@@ -1,0 +1,21 @@
+#version 450
+
+// 256 threads per workgroup in a 1D line — elementwise ops
+// don't need the 2D grid that matmul needed
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer OutputBuf { float y[]; };
+
+layout(push_constant) uniform PushConsts {
+    uint n_elements;  // total number of values in the tensor
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Same bounds check as matmul — threads past the end do nothing
+    if (idx >= pc.n_elements) return;
+
+    y[idx] = max(0.0, x[idx]);
+}

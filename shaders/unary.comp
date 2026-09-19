@@ -1,0 +1,45 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly  buffer InputBuf  { float x[]; };
+layout(set = 0, binding = 1) writeonly buffer OutputBuf { float y[]; };
+
+// Floats to match Kompute's push constant handling — cast to uint inside
+layout(push_constant) uniform PushConsts {
+    float n_elements;
+    float op;  // 0=relu  1=sigmoid  2=tanh  3=gelu
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint n   = uint(pc.n_elements);
+    uint op  = uint(pc.op);
+
+    if (idx >= n) return;
+
+    float val = x[idx];
+    float result;
+
+    if (op == 0u) {
+        // ReLU
+        result = max(0.0, val);
+
+    } else if (op == 1u) {
+        // Sigmoid
+        result = 1.0 / (1.0 + exp(-val));
+
+    } else if (op == 2u) {
+        // Tanh — GLSL has it built in
+        result = tanh(val);
+
+    } else {
+        // GELU approximation
+        // The exact form needs erf() which GLSL doesn't have,
+        // so we use the tanh approximation — what PyTorch uses internally
+        float inner = 0.7978845608 * (val + 0.044715 * val * val * val);
+        result = 0.5 * val * (1.0 + tanh(inner));
+    }
+
+    y[idx] = result;
+}

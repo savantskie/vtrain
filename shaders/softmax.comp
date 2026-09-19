@@ -1,0 +1,73 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer Input  { float x[]; };
+layout(set = 0, binding = 1) buffer Output { float y[]; };
+
+layout(push_constant) uniform PushConsts {
+    float rows;
+    float cols;
+    float padding0;
+    float padding1;
+} pc;
+
+shared float shared_data[256];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.x;
+
+    uint cols = uint(pc.cols);
+    uint rows = uint(pc.rows);
+
+    if (row >= rows) return;
+
+    // --- Pass 1: find the max value in this row ---
+    // Each thread checks its elements and keeps the largest
+    float thread_max = -1.0 / 0.0;  // negative infinity
+    for (uint i = col; i < cols; i += 256u) {
+        thread_max = max(thread_max, x[row * cols + i]);
+    }
+
+    shared_data[col] = thread_max;
+    barrier();
+
+    // Reduction: collapse to single max
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (col < stride) {
+            shared_data[col] = max(shared_data[col], shared_data[col + stride]);
+        }
+        barrier();
+    }
+
+    float row_max = shared_data[0];
+
+    // --- Pass 2: compute exp(x - max) and sum ---
+    // Subtracting the max before exp() keeps values in a safe range
+    // without changing the final probabilities
+    float thread_sum = 0.0;
+    for (uint i = col; i < cols; i += 256u) {
+        float val = exp(x[row * cols + i] - row_max);
+        y[row * cols + i] = val;   // store temporarily, we'll normalize next
+        thread_sum += val;
+    }
+
+    shared_data[col] = thread_sum;
+    barrier();
+
+    // Reduction: collapse to total sum
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (col < stride) {
+            shared_data[col] += shared_data[col + stride];
+        }
+        barrier();
+    }
+
+    float row_sum = shared_data[0];
+
+    // --- Pass 3: normalize ---
+    for (uint i = col; i < cols; i += 256u) {
+        y[row * cols + i] /= row_sum;
+    }
+}

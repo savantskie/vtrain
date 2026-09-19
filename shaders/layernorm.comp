@@ -1,0 +1,75 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer Input  { float x[]; };
+layout(set = 0, binding = 1) buffer Output { float y[]; };
+layout(set = 0, binding = 2) buffer Gamma  { float gamma[]; };  // learned scale
+layout(set = 0, binding = 3) buffer Beta   { float beta[];  };  // learned shift
+
+layout(push_constant) uniform PushConsts {
+    float rows;
+    float cols;
+    float eps;    // small value added to avoid dividing by zero
+    float padding;
+} pc;
+
+// Shared memory — all 256 threads in a workgroup can read and write here
+// This is how threads cooperate: one thread writes a partial sum,
+// another reads it. Way faster than going back to main GPU memory.
+shared float shared_sum[256];
+shared float shared_sum_sq[256];
+
+void main() {
+    uint col = gl_LocalInvocationID.x;   // which thread am I within the workgroup
+    uint row = gl_WorkGroupID.x;         // which row am I processing
+
+    uint cols = uint(pc.cols);
+    uint rows = uint(pc.rows);
+
+    if (row >= rows) return;
+
+    // --- Pass 1: each thread accumulates its share of the row ---
+    // If cols=1024 and we have 256 threads, each thread handles 4 elements
+    float sum    = 0.0;
+    float sum_sq = 0.0;
+
+    for (uint i = col; i < cols; i += 256u) {
+        float val = x[row * cols + i];
+        sum    += val;
+        sum_sq += val * val;
+    }
+
+    // Park this thread's partial sums in shared memory
+    shared_sum[col]    = sum;
+    shared_sum_sq[col] = sum_sq;
+
+    // Wait for ALL threads in the workgroup to finish writing
+    // before anyone starts reading. This is the synchronization barrier.
+    barrier();
+
+    // --- Reduction: collapse 256 partial sums into 1 ---
+    // Each round, the active threads halve. Thread 0 ends up with the total.
+    // Round 1: threads 0-127 each add from threads 128-255
+    // Round 2: threads 0-63 each add from threads 64-127
+    // ...and so on until thread 0 holds the total
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (col < stride) {
+            shared_sum[col]    += shared_sum[col + stride];
+            shared_sum_sq[col] += shared_sum_sq[col + stride];
+        }
+        barrier();  // sync after every round
+    }
+
+    // Thread 0 now holds the totals — compute mean and variance
+    float mean     = shared_sum[0]    / float(cols);
+    float variance = shared_sum_sq[0] / float(cols) - mean * mean;
+    float inv_std  = inversesqrt(variance + pc.eps);
+
+    // --- Pass 2: normalize and apply learned scale + shift ---
+    for (uint i = col; i < cols; i += 256u) {
+        float val      = x[row * cols + i];
+        float normed   = (val - mean) * inv_std;
+        y[row * cols + i] = gamma[i] * normed + beta[i];
+    }
+}

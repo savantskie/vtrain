@@ -1,0 +1,46 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer Input  { float x[]; };
+layout(set = 0, binding = 1) buffer Output { float y[]; };
+
+layout(push_constant) uniform PushConsts {
+    float rows;
+    float cols;
+    float padding0;
+    float padding1;
+} pc;
+
+// Shared memory tile — each workgroup loads a 16x16 block of the
+// input into fast local memory, then writes it out transposed.
+// This avoids uncoalesced global memory access which kills performance
+// on a naive transpose.
+shared float tile[16][17]; // 17 not 16 — avoids bank conflicts
+
+void main() {
+    uint rows = uint(pc.rows);
+    uint cols = uint(pc.cols);
+
+    // Where in the INPUT this thread reads from
+    uint in_row = gl_WorkGroupID.x * 16 + gl_LocalInvocationID.x;
+    uint in_col = gl_WorkGroupID.y * 16 + gl_LocalInvocationID.y;
+
+    // Load input tile into shared memory
+    if (in_row < rows && in_col < cols) {
+        tile[gl_LocalInvocationID.x][gl_LocalInvocationID.y] =
+            x[in_row * cols + in_col];
+    }
+
+    barrier();
+
+    // Where in the OUTPUT this thread writes to
+    // Note: row and col are swapped — that's the transpose
+    uint out_row = gl_WorkGroupID.y * 16 + gl_LocalInvocationID.x;
+    uint out_col = gl_WorkGroupID.x * 16 + gl_LocalInvocationID.y;
+
+    if (out_row < cols && out_col < rows) {
+        y[out_row * rows + out_col] =
+            tile[gl_LocalInvocationID.y][gl_LocalInvocationID.x];
+    }
+}

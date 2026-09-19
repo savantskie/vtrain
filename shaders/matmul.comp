@@ -1,0 +1,50 @@
+#version 450
+
+// Workgroup size: 16x16 block of threads = 256 threads per workgroup
+// Think of this as the "chunk size" we hand to each batch of threads
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// These are our three matrices, flattened into 1D arrays
+// 'binding' is just which slot the data is plugged into — like function parameters
+// readonly means this shader promises not to write to A or B
+layout(set = 0, binding = 0) readonly buffer MatA { float a[]; };
+layout(set = 0, binding = 1) readonly buffer MatB { float b[]; };
+layout(set = 0, binding = 2) writeonly buffer MatC { float c[]; };
+
+// Push constants: small values we send alongside the shader call
+// M = rows of A, K = cols of A / rows of B, N = cols of B
+// These tell each thread where the edges of the grid are
+layout(push_constant) uniform PushConsts {
+    float M;
+    float K;
+    float N;
+} pc;
+
+void main() {
+    // Each thread asks: "which row and column am I responsible for?"
+    uint row = gl_GlobalInvocationID.x;
+    uint col = gl_GlobalInvocationID.y;
+
+    uint M = uint(pc.M);
+    uint K = uint(pc.K);
+    uint N = uint(pc.N);
+
+    // Bounds check — we launch more threads than we might need
+    // (grid has to be divisible by workgroup size), so threads
+    // that fall outside the actual matrix just do nothing
+    if (row >= M || col >= N) return;
+
+    // This is the actual matmul for one output cell:
+    // walk across row 'row' of A and column 'col' of B simultaneously,
+    // multiply each pair, accumulate the sum
+    // A[row][k] in a flat array = a[row * K + k]
+    // B[k][col] in a flat array = b[k * N + col]
+    float sum = 0.0;
+    for (uint k = 0; k < K; k++) {
+        sum += a[row * K + k] * b[k * N + col];
+    }
+
+    // Write result into output grid
+    // C[row][col] = c[row * N + col]
+    c[row * N + col] = sum;
+}

@@ -1,0 +1,27 @@
+# Virtual environment
+.venv/
+
+# Kompute build
+kompute-src/
+
+# Compiled shaders - regenerated at runtime
+compiled/*.spv
+
+# Training runs and model weights
+models/*/
+!models/.gitkeep
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Data files - too large for repo
+*.txt
+*.bz2
+*.xml
+
+# OS junk
+.DS_Store
+Thumbs.db
