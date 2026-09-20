@@ -27,6 +27,9 @@ A complete training framework built from the ground up:
 - Full forward pass: matmul, elementwise ops (ReLU, GELU, sigmoid, tanh, add, sub,
   mul, div), layer normalization, softmax, transpose, attention
 - Full backward pass with GPU shaders for every op - no CPU fallback
+- GPU buffer reuse pool to avoid allocating GPU memory every dispatch
+- Memory leak prevention: in-place gradient zeroing, computation graph flushing,
+  and periodic glibc arena trimming keep system RAM stable over long training runs
 - Autograd system with topological sort and numerical gradient verification
 - Loss functions: MSE and cross-entropy
 - Optimizers: SGD and Adam
@@ -35,6 +38,7 @@ A complete training framework built from the ground up:
 - Character-level language model (SmallLM) ready to train on any text corpus
 - Wikipedia data pipeline: download, extract, clean, and train
 - Training loop with checkpointing, crash recovery, and resume support
+- Text generation from trained checkpoints
 
 ## Hardware requirements
 
@@ -140,7 +144,8 @@ compiled/       - SPIR-V compiled shaders (generated at runtime)
 models/         - Training runs and checkpoints
 tests/          - Test suite
 train_wiki.py   - Wikipedia training script
-setup.sh        - One-shot environment setup
+  generate.py     - Text generation from trained checkpoints
+  setup.sh        - One-shot environment setup
 build_kompute.sh - Kompute build script
 ```
 
@@ -158,6 +163,11 @@ obvious from the Kompute documentation:
    kp.OpSyncLocal. The PyPI package docs reference kp.OpTensorSyncDevice which
    does not exist in the actual build - and the PyPI package itself is broken on
    CMake 4.x anyway, which is why this repo builds Kompute from source.
+4. System RAM growth over long training runs is prevented by in-place gradient
+   zeroing (allocating new arrays every step slowly fragments glibc's malloc
+   arena), computation graph flushing after every backward pass, and periodic
+   gc.collect() + malloc_trim() calls. If you see RAM growing unboundedly,
+   check that your training loop includes all three.
 
 ## License
 
