@@ -56,3 +56,27 @@ def matmul(mgr: kp.Manager, A: np.ndarray, B: np.ndarray) -> np.ndarray:
     sq.eval()                                            # execute everything
 
     return t_c.data().reshape(M, N)
+    
+def matmul_gpu(mgr: kp.Manager, t_a: kp.Tensor, t_b: kp.Tensor,
+               t_c: kp.Tensor, M: int, K: int, N: int) -> None:
+    """
+    GPU-resident matmul: runs shader directly on pre-uploaded kp.Tensors.
+    No CPU<->GPU transfer — inputs and output all stay on GPU.
+    t_c receives the result.
+    """
+    spirv = compile_shader("matmul").read_bytes()
+    wg_x  = math.ceil(M / 16)
+    wg_y  = math.ceil(N / 16)
+
+    algo = mgr.algorithm(
+        [t_a, t_b, t_c],
+        spirv,
+        (wg_x, wg_y, 1),
+        [],
+        [float(M), float(K), float(N)]
+    )
+
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()
+    # No OpSyncLocal — result stays on GPU

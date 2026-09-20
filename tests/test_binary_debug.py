@@ -16,15 +16,18 @@ t_a = mgr.tensor(A)
 t_b = mgr.tensor(B)
 t_c = mgr.tensor(C)
 
+SHADERS_DIR   = Path(__file__).parent.parent / "shaders"
+COMPILED_DIR  = Path(__file__).parent.parent / "compiled"
+
 import subprocess
 subprocess.run(
-    ["glslc", 
-     "/media/nate/Friday/VTrain/shaders/binary_debug.comp",
-     "-o", "/media/nate/Friday/VTrain/compiled/binary_debug.spv"],
+    ["glslc",
+     str(SHADERS_DIR / "binary_debug.comp"),
+     "-o", str(COMPILED_DIR / "binary_debug.spv")],
     check=True
 )
 
-spirv = open("/media/nate/Friday/VTrain/compiled/binary_debug.spv", "rb").read()
+spirv = open(COMPILED_DIR / "binary_debug.spv", "rb").read()
 
 algo = mgr.algorithm([t_a, t_b, t_c], spirv, (1, 1, 1), [], [])
 

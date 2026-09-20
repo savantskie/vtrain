@@ -6,8 +6,10 @@ resumable from last checkpoint.
 
 import sys
 import signal
+import gc
 import numpy as np
 import kp
+import ctypes
 from pathlib import Path
 from vtrain.data.dataset  import CharDataset
 from vtrain.model.lm      import SmallLM
@@ -141,6 +143,9 @@ def main():
         print("  Starting fresh")
 
     mgr = kp.Manager(CONFIG["device"])
+    from vtrain.gpu_pool import GPUBufferPool, set_pool
+    pool = GPUBufferPool(mgr)
+    set_pool(pool)
     opt = Adam(model.parameters(), lr=CONFIG["lr"])
 
     step       = start_step
@@ -166,6 +171,12 @@ def main():
 
         loss = cross_entropy_loss(probs, Y_oh)
         loss.backward()
+        from vtrain.tensor import flush_graph
+        param_ids = {id(p) for p in model.parameters()}
+        flush_graph(loss, param_ids, pool)
+        gc.collect()
+        if sys.platform == 'linux':
+            ctypes.CDLL('libc.so.6').malloc_trim(0)
         opt.step()
 
         loss_val    = float(loss.data)

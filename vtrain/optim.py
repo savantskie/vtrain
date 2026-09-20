@@ -31,7 +31,7 @@ class SGD:
         """Reset all gradients to zero. Call before each forward pass."""
         for p in self.params:
             if p.grad is not None:
-                p.grad = np.zeros_like(p.data)
+                p.grad[:] = 0.0
 
 
 class Adam:
@@ -86,4 +86,4 @@ class Adam:
     def zero_grad(self):
         for p in self.params:
             if p.grad is not None:
-                p.grad = np.zeros_like(p.data)
+                p.grad[:] = 0.0

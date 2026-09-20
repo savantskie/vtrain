@@ -39,3 +39,26 @@ def transpose(mgr: kp.Manager, X: np.ndarray) -> np.ndarray:
     sq.eval()
 
     return t_y.data().reshape(cols, rows)
+
+
+def transpose_gpu(mgr: kp.Manager, t_x: kp.Tensor, t_y: kp.Tensor,
+                  rows: int, cols: int) -> None:
+    """
+    GPU-resident transpose — no CPU<->GPU transfer.
+    t_y receives the result and stays on GPU.
+    """
+    spirv = compile_shader("transpose").read_bytes()
+    wg_x  = math.ceil(rows / 16)
+    wg_y  = math.ceil(cols / 16)
+
+    algo = mgr.algorithm(
+        [t_x, t_y],
+        spirv,
+        (wg_x, wg_y, 1),
+        [],
+        [float(rows), float(cols), float(0), float(0)]
+    )
+
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()

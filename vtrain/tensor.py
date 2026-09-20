@@ -4,27 +4,93 @@ import numpy as np
 class Tensor:
     """
     Wraps a numpy array with gradient tracking and autograd support.
-    The GPU ops in functional.py create these and wire up the backward
-    closures — this class just manages the graph and the backward pass.
+    Supports GPU-resident mode: data lives in a kp.Tensor GPU buffer
+    and is only synced to CPU when .data is actually accessed (lazy sync).
     """
 
     def __init__(self, data, requires_grad=True, name=""):
-        self.data          = np.array(data, dtype=np.float32)
+        self._data        = np.array(data, dtype=np.float32)
+        self._kp_tensor   = None               # GPU buffer (kp.Tensor), if resident
+        self._gpu_fresh   = False              # True = GPU buffer has latest values
+        self._mgr         = None               # kp.Manager, set by GPU ops
+        self._shape_cache = self._data.shape   # cached — shape never triggers GPU sync
         self.requires_grad = requires_grad
-        self.grad          = np.zeros_like(self.data) if requires_grad else None
-        self._backward     = lambda: None  # no-op until an op registers one
-        self._prev         = set()         # Tensors this one was computed from
-        self.name          = name          # optional label for debugging
+        self.grad          = np.zeros_like(self._data) if requires_grad else None
+        self._backward     = lambda: None
+        self._prev         = set()
+        self.name          = name
+
+    # ── Data property — lazy GPU sync ────────────────────────────────────────
+
+    @property
+    def data(self) -> np.ndarray:
+        """Return CPU numpy array, syncing from GPU first if GPU has fresh data."""
+        if self._gpu_fresh and self._kp_tensor is not None and self._mgr is not None:
+            import kp
+            sq = self._mgr.sequence()
+            sq.record(kp.OpSyncLocal([self._kp_tensor]))
+            sq.eval()
+            self._data      = (self._kp_tensor.data()
+                                .reshape(self._shape_cache)
+                                .copy()
+                                .astype(np.float32))
+            self._gpu_fresh = False
+        return self._data
+
+    @data.setter
+    def data(self, value: np.ndarray):
+        """Store new numpy array and mark GPU buffer as stale."""
+        self._data        = np.array(value, dtype=np.float32)
+        self._shape_cache = self._data.shape
+        self._gpu_fresh   = False
+
+    # ── GPU residency helpers ─────────────────────────────────────────────────
+
+    def mark_gpu_fresh(self, kp_tensor, shape: tuple, mgr) -> None:
+        """
+        Called by GPU ops after writing their result into kp_tensor.
+        Marks this Tensor as GPU-resident so the next op can skip the upload.
+        """
+        self._kp_tensor   = kp_tensor
+        self._shape_cache = shape
+        self._gpu_fresh   = True
+        self._mgr         = mgr
+
+    def ensure_on_gpu(self, mgr):
+        """
+        Return a kp.Tensor with this Tensor's current data on the GPU.
+        Uploads from CPU only if the GPU buffer is stale or missing.
+        """
+        import kp
+        from vtrain.gpu_pool import get_pool
+        pool = get_pool()
+
+        if self._gpu_fresh and self._kp_tensor is not None:
+            return self._kp_tensor   # already current — skip upload
+
+        flat = self._data.flatten().astype(np.float32)
+        size = len(flat)
+
+        # Allocate or reuse a buffer of the right size
+        if self._kp_tensor is None or len(self._kp_tensor.data()) != size:
+            if self._kp_tensor is not None and pool is not None:
+                pool.release(self._kp_tensor)
+            self._kp_tensor = (pool.acquire(size) if pool is not None
+                               else mgr.tensor(flat))
+
+        # Write into buffer's CPU-side mapping and upload to GPU
+        self._kp_tensor.data()[:] = flat
+        sq = mgr.sequence()
+        sq.record(kp.OpSyncDevice([self._kp_tensor]))
+        sq.eval()
+
+        self._gpu_fresh   = True
+        self._mgr         = mgr
+        return self._kp_tensor
+
+    # ── Autograd ──────────────────────────────────────────────────────────────
 
     def backward(self):
-        """
-        Run backprop from this tensor back through the whole graph.
-        Assumes this is a scalar output (loss), or will sum gradients
-        across the output if not.
-        """
-        # Step 1: topological sort — depth-first, children before parents
-        # This guarantees that when we backprop through a node, all the
-        # gradients flowing INTO it from later nodes are already accumulated
         topo    = []
         visited = set()
 
@@ -37,23 +103,17 @@ class Tensor:
 
         build_topo(self)
 
-        # Step 2: seed — the gradient of the output w.r.t. itself is 1
-        # (if this is a scalar loss, that's literally just 1.0)
-        self.grad = np.ones_like(self.data)
+        # Loss is always on CPU — use _data directly, no sync needed
+        self.grad = np.ones_like(self._data)
 
-        # Step 3: unwind the graph in reverse order, firing each
-        # backward closure. Each closure deposits gradients into
-        # its input tensors' .grad fields.
         for t in reversed(topo):
             t._backward()
 
     def zero_grad(self):
-        """Reset gradient accumulator to zero. Call before each training step."""
         if self.grad is not None:
-            self.grad = np.zeros_like(self.data)
+            self.grad[:] = 0.0
 
     def zero_grad_all(self):
-        """Zero gradients for this tensor and all tensors in its graph."""
         visited = set()
 
         def _zero(t):
@@ -65,14 +125,50 @@ class Tensor:
 
         _zero(self)
 
-    @property
-    def shape(self):
-        return self.data.shape
+    # ── Shape helpers — never trigger GPU sync ────────────────────────────────
 
     @property
-    def ndim(self):
-        return self.data.ndim
+    def shape(self) -> tuple:
+        return self._shape_cache
+
+    @property
+    def ndim(self) -> int:
+        return len(self._shape_cache)
 
     def __repr__(self):
         name_str = f" name={self.name!r}" if self.name else ""
         return f"Tensor(shape={self.shape}{name_str})"
+
+    #-- Flush Graphs
+
+
+def flush_graph(root: 'Tensor', keep: set, pool) -> None:
+    """
+    After backward(), walk the computation graph and release GPU buffers
+    on all intermediate tensors back to the pool, then clear _prev
+    references so Python GC can actually collect them.
+
+    keep: set of id(tensor) for model parameters — leave those alone.
+    """
+    visited = set()
+
+    def _walk(t):
+        if id(t) in visited:
+            return
+        visited.add(id(t))
+
+        for child in t._prev:
+            _walk(child)
+
+        if id(t) not in keep:
+            if t._kp_tensor is not None and pool is not None:
+                pool.release(t._kp_tensor)
+                t._kp_tensor = None
+                t._gpu_fresh = False
+            t.grad  = None
+            if t is not root:
+                t._data = None
+            t._prev = set()       # break reference cycles
+            t._backward = None    # release closure-captured numpy arrays
+
+    _walk(root)

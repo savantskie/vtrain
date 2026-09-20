@@ -20,19 +20,85 @@ from vtrain.ops.softmax   import softmax   as _gpu_softmax
 # ── Matmul ────────────────────────────────────────────────────────────────────
 
 def matmul(mgr: kp.Manager, A: Tensor, B: Tensor) -> Tensor:
-    out = Tensor(_gpu_matmul(mgr, A.data, B.data))
+    from vtrain.gpu_pool import get_pool
+    from vtrain.ops.matmul import matmul_gpu as _matmul_resident
+    from vtrain.ops.transpose import transpose_gpu as _transpose_resident
+
+    M    = A.shape[0]
+    K    = A.shape[1]
+    N    = B.shape[1]
+    pool = get_pool()
+
+    t_a = A.ensure_on_gpu(mgr)
+    t_b = B.ensure_on_gpu(mgr)
+
+    t_c = (pool.acquire(M * N) if pool is not None
+           else mgr.tensor(np.zeros(M * N, dtype=np.float32)))
+
+    _matmul_resident(mgr, t_a, t_b, t_c, M, K, N)
+
+    out = Tensor(np.empty((M, N), dtype=np.float32))
+    out.mark_gpu_fresh(t_c, (M, N), mgr)
     out._prev = {A, B}
 
     def _backward():
-        # C = A @ B
-        # dL/dA = dL/dC @ B.T
-        # dL/dB = A.T  @ dL/dC
+        # A.grad += out.grad @ B.T
         if A.requires_grad:
-            B_T = _gpu_transpose(mgr, B.data)
-            A.grad += _gpu_matmul(mgr, out.grad, B_T)
+            t_b_cur = B.ensure_on_gpu(mgr)
+            t_b_T   = (pool.acquire(N * K) if pool is not None
+                       else mgr.tensor(np.zeros(N * K, dtype=np.float32)))
+            _transpose_resident(mgr, t_b_cur, t_b_T, K, N)
+
+            grad_flat = out.grad.flatten().astype(np.float32)
+            t_grad    = (pool.acquire(len(grad_flat)) if pool is not None
+                         else mgr.tensor(np.zeros(len(grad_flat), dtype=np.float32)))
+            t_grad.data()[:] = grad_flat
+            sq = mgr.sequence()
+            sq.record(kp.OpSyncDevice([t_grad]))
+            sq.eval()
+
+            t_res_a = (pool.acquire(M * K) if pool is not None
+                       else mgr.tensor(np.zeros(M * K, dtype=np.float32)))
+            _matmul_resident(mgr, t_grad, t_b_T, t_res_a, M, N, K)
+
+            sq2 = mgr.sequence()
+            sq2.record(kp.OpSyncLocal([t_res_a]))
+            sq2.eval()
+            A.grad += t_res_a.data().reshape(M, K)
+
+            if pool is not None:
+                pool.release(t_b_T)
+                pool.release(t_grad)
+                pool.release(t_res_a)
+
+        # B.grad += A.T @ out.grad
         if B.requires_grad:
-            A_T = _gpu_transpose(mgr, A.data)
-            B.grad += _gpu_matmul(mgr, A_T, out.grad)
+            t_a_cur = A.ensure_on_gpu(mgr)
+            t_a_T   = (pool.acquire(K * M) if pool is not None
+                       else mgr.tensor(np.zeros(K * M, dtype=np.float32)))
+            _transpose_resident(mgr, t_a_cur, t_a_T, M, K)
+
+            grad_flat = out.grad.flatten().astype(np.float32)
+            t_grad    = (pool.acquire(len(grad_flat)) if pool is not None
+                         else mgr.tensor(np.zeros(len(grad_flat), dtype=np.float32)))
+            t_grad.data()[:] = grad_flat
+            sq = mgr.sequence()
+            sq.record(kp.OpSyncDevice([t_grad]))
+            sq.eval()
+
+            t_res_b = (pool.acquire(K * N) if pool is not None
+                       else mgr.tensor(np.zeros(K * N, dtype=np.float32)))
+            _matmul_resident(mgr, t_a_T, t_grad, t_res_b, K, M, N)
+
+            sq2 = mgr.sequence()
+            sq2.record(kp.OpSyncLocal([t_res_b]))
+            sq2.eval()
+            B.grad += t_res_b.data().reshape(K, N)
+
+            if pool is not None:
+                pool.release(t_a_T)
+                pool.release(t_grad)
+                pool.release(t_res_b)
 
     out._backward = _backward
     return out
