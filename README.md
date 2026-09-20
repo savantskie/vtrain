@@ -48,6 +48,7 @@ A complete training framework built from the ground up:
 
 - Any Vulkan 1.1+ capable GPU (AMD, NVIDIA, Intel - anything with a Vulkan driver)
 - Tested on: AMD MI50 32GB (gfx906, RADV driver, Vulkan 1.4.335)
+- **Single-GPU training is implemented and operational. Multi-GPU Vulkan training is planned and currently under development.**
 - Linux recommended. Other platforms untested but should work if Vulkan is available.
 - No ROCm required. No CUDA required. No specific driver version required beyond
   basic Vulkan support.
