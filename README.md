@@ -27,6 +27,10 @@ A complete training framework built from the ground up:
 - Full forward pass: matmul, elementwise ops (ReLU, GELU, sigmoid, tanh, add, sub,
   mul, div), layer normalization, softmax, transpose, attention
 - Full backward pass with GPU shaders for every op - no CPU fallback
+- GPU-resident backward: matmul gradients computed entirely on GPU
+  via buffer pool, avoiding CPU round-trips
+- Lazy GPU sync: Tensor data stays on GPU across chained operations
+  and syncs to CPU only when accessed
 - GPU buffer reuse pool to avoid allocating GPU memory every dispatch
 - Memory leak prevention: in-place gradient zeroing, computation graph flushing,
   and periodic glibc arena trimming keep system RAM stable over long training runs
@@ -116,6 +120,28 @@ python3 train_wiki.py --data /path/to/your/text.txt --run-dir models/myrun
 The character-level tokenizer builds its vocabulary automatically from whatever
 text you give it. No preprocessing required beyond having a plain text file.
 
+## Text generation
+
+Generate text from a trained checkpoint:
+
+```bash
+python3 generate.py --vocab models/run1/vocab.json --checkpoint models/run1/checkpoints/step_010000_final
+```
+
+Full option list:
+
+```
+--vocab         Path to vocab.json (required)
+--checkpoint    Path to checkpoint directory (required)
+--d-model       Model dimension (default: 128)
+--n-heads       Attention heads (default: 4)
+--n-layers      Transformer layers (default: 2)
+--seed          Seed text (default: "The history of")
+--n-chars       Characters to generate (default: 500)
+--temperature   Sampling temperature (default: 0.2)
+--device        Vulkan device index (default: 0)
+```
+
 ## Running the tests
 
 ```bash
@@ -133,8 +159,9 @@ vtrain/
   ops/          - GPU op wrappers (matmul, elementwise, layernorm, softmax, transpose)
   model/        - Model architecture (linear, transformer, language model, checkpoint)
   data/         - Data pipeline (character dataset, Wikipedia extractor)
-  tensor.py     - Tensor class with autograd
+  tensor.py     - Tensor class with autograd (GPU-resident lazy sync)
   functional.py - Differentiable GPU op wrappers
+  gpu_pool.py   - GPU buffer reuse pool
   grad_check.py - Numerical gradient verification
   loss.py       - Loss functions
   optim.py      - SGD and Adam optimizers
@@ -145,6 +172,7 @@ models/         - Training runs and checkpoints
 tests/          - Test suite
 train_wiki.py   - Wikipedia training script
   generate.py     - Text generation from trained checkpoints
+  VTRAIN_SYSTEM_MAP.md - Complete system architecture reference
   setup.sh        - One-shot environment setup
 build_kompute.sh - Kompute build script
 ```
