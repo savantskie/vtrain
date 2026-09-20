@@ -61,7 +61,7 @@ Python 3.8+, glslc (from glslang-tools or shaderc), and the Vulkan loader.
 ## Setup
 
 ```bash
-git clone https://github.com/yourusername/vtrain.git
+git clone https://github.com/savantskie/vtrain.git
 cd vtrain
 bash setup.sh
 source .venv/bin/activate
