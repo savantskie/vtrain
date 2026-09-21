@@ -1,0 +1,12 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer InBuf  { float src[]; };
+layout(set = 0, binding = 1) buffer OutBuf { float dst[]; };
+layout(push_constant) uniform Push { float B; float d_model; float n_heads; float d_k; } pc;
+void main() {
+    uint Bval=uint(pc.B), dmodel=uint(pc.d_model), nheads=uint(pc.n_heads), dk=uint(pc.d_k);
+    uint total = nheads * Bval * dk, idx = gl_GlobalInvocationID.x;
+    if (idx >= total) return;
+    uint k = idx % dk, b = (idx / dk) % Bval, h = idx / (Bval * dk);
+    dst[b * dmodel + h * dk + k] = src[idx];
+}

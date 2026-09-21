@@ -23,6 +23,7 @@ generate.py    ───┤
             │  grad_check.py  (verify grads) │
             │  shader_utils.py(compile .comp)│
             │  gpu_pool.py    (buffer reuse) │
+             │  gpu_detect.py  (device info)  │
             │                                 │
             │  ops/ ──────────────────────┐  │
             │  │  matmul.py   (GPU matmul)│  │
@@ -71,13 +72,18 @@ generate.py    ───┤
 
 Wraps numpy arrays with autograd support. Key design:
 
-- **Lazy GPU sync**: `.data` property syncs GPU→CPU only when accessed
-- **GPU residency**: `mark_gpu_fresh()`/`ensure_on_gpu()` keep data on GPU
-  between chained operations, avoiding uploads
-- **Buffer pool**: `ensure_on_gpu()` checks `get_pool()` before allocating
+- **GPU-primary storage**: Data lives in a `kp.Tensor` GPU buffer and is only synced
+  to CPU when `.data` is accessed (lazy sync)
+- **GPU-resident gradients**: `_grad_kp` replaces `self.grad` as a numpy array.
+  `grad` is now a property with lazy GPU→CPU sync. `_ensure_grad_on_gpu()` ensures
+  the gradient buffer exists on GPU before any backward closure uses it.
+- **Pre-initialized backward**: `backward()` allocates `_grad_kp` for every node in
+  the computation graph before running any closure, so closures can safely
+  accumulate into GPU buffers without checking for null.
+- **Buffer pool**: `ensure_on_gpu()` uses `get_pool()` for GPU buffer allocation
 - **Autograd**: topological sort + backward closures in reverse order
-- **flush_graph()**: After backward, releases GPU buffers for non-parameter
-  tensors and breaks reference cycles to prevent memory leaks
+- **flush_graph()**: After backward, releases GPU buffers (`_kp_tensor` and
+  `_grad_kp`) for non-parameter tensors and breaks reference cycles
 
 ### GPU Operations (`vtrain/ops/`)
 
@@ -106,16 +112,30 @@ Every op follows the same dual pattern:
 | softmax.comp | 256×1 | X, Y | 3-pass: max, exp+sum, normalize |
 | layernorm.comp | 256×1 | X, Y, γ, β | 2-pass: mean/var, normalize+scale |
 | transpose.comp | 16×16 | X, Y | Tiled with bank-conflict avoidance |
+| adam_step.comp | 256×1 | p, g, m, v | Per-element Adam update, 8 push constants |
+| sgd_step.comp | 256×1 | p, g | Per-element SGD update |
+| accumulate.comp | 256×1 | dst, src | dst += sign * src (sign push constant) |
+| unary_backward.comp | 256×1 | go, x, gi | gi += go * derivative(x) for relu/sigmoid/tanh/gelu |
+| softmax_backward.comp | 256×1 | dy, s, dx | dx += s * (dy - sum(dy*s)), shared-memory reduction |
+| loss_ce.comp | 256×1 | p, t, g, loss | Cross-entropy loss + gradient, 1 workgroup/batch element |
+| split_heads.comp | 256×1 | src, dst | Q(B, d_model) → Q_heads(n_heads, B, d_k) |
+| merge_heads.comp | 256×1 | src, dst | Inverse of split_heads |
 
 ### Autograd (`vtrain/functional.py`)
 
 Every op function takes `kp.Manager` + Tensor inputs and:
-1. Calls raw GPU op on `.data`
-2. Wraps result in Tensor with `_prev` set to inputs
-3. Defines `_backward` closure that accumulates gradients
+1. Calls `ensure_on_gpu()` on inputs to ensure GPU buffers exist
+2. Acquires output GPU buffer from pool
+3. Dispatches GPU-resident op (no CPU transfer)
+4. Wraps result in Tensor with `_prev` set to inputs and `mark_gpu_fresh()`
+5. Defines `_backward` closure that accumulates gradients via GPU ops
 
-Matmul backward uses GPU-resident ops (transpose + matmul with buffer pool).
-Other ops compute gradients on CPU via numpy arithmetic.
+**All backward closures use GPU ops.** No numpy math in any backward path:
+- matmul: GPU-resident matmul + transpose
+- unary ops (relu, sigmoid, tanh, gelu): `unary_backward_gpu` shader
+- binary ops (add, sub, mul, div): `accumulate_gpu` + `binary_gpu`
+- softmax: `softmax_backward_gpu` shader (shared-memory reduction)
+- layer norm: CPU math but gradients synced to GPU via `_ensure_grad_on_gpu()`
 
 ### Model Architecture
 
@@ -133,12 +153,16 @@ loop-variable capture bug.
 Configurable via CLI args in `train_wiki.py`:
 - Data loading through CharDataset (character-level tokenizer)
 - Model construction from config
-- Checkpoint resume from last saved step
-- Per step: zero_grad → get_batch → forward → softmax → CE loss →
-  backward → flush_graph → gc.collect → malloc_trim → optimizer step
+- Checkpoint resume from last saved step (weights + optimizer state)
+- Parameter upload to GPU and persistent registration in buffer pool
+- Per step: zero_grad (GPU) → get_batch → forward (GPU-resident) →
+  softmax → CE loss (GPU shader) → backward (GPU-resident) →
+  flush_graph → optimizer step (GPU shader, per-parameter dispatch)
 
-The flush_graph + gc.collect + malloc_trim sequence prevents system RAM
-growth over long training runs.
+No CPU round-trips during training. CPU only involved for:
+- Loss scalar read (one float per log interval)
+- Checkpoint save/load (one GPU→CPU sync per parameter)
+- Console logging
 
 ## Known Quirks
 
@@ -151,11 +175,16 @@ growth over long training runs.
    `kp.OpSyncLocal`. The PyPI package uses different names — and the PyPI
    package itself is broken on CMake 4.x, which is why this project builds
    Kompute from source.
-4. **zero_grad()**: Uses in-place `p.grad[:] = 0.0` rather than allocating
-   new arrays. Prevents system RAM growth over many training steps.
-5. **Indices in get_batch()**: `CharDataset.get_batch()` returns float32 arrays
-   for both input and target. Targets are implicitly cast — no separate
-   integer target path exists yet.
+4. **GPU-resident gradients**: Gradients are stored as GPU `kp.Tensor` buffers,
+   not numpy arrays. Accessing `tensor.grad` triggers a GPU→CPU sync. Backward
+   closures accumulate into `_grad_kp` directly via GPU shader dispatches.
+5. **Pre-initialized backward**: `backward()` allocates gradient buffers for every
+   node in the autograd graph before running any closure. This prevents null
+   pointer crashes but uses more GPU memory during the backward pass. Buffers
+   are freed by `flush_graph()` after the optimizer step.
+6. **Indices in get_batch()**: `CharDataset.get_batch()` returns float32 arrays
+   for both input and target. Targets are implicitly cast — no separate integer
+   target path exists yet.
 
 ## Test Coverage
 

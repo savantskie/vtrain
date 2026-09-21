@@ -73,10 +73,60 @@ def _binary(mgr: kp.Manager, A: np.ndarray, B: np.ndarray, op: str) -> np.ndarra
 # Public API
 def relu(mgr, X):     return _unary(mgr, X, "relu")
 def sigmoid(mgr, X):  return _unary(mgr, X, "sigmoid")
-def tanh_act(mgr, X): return _unary(mgr, X, "tanh")    # named to avoid shadowing math.tanh
+def tanh_act(mgr, X): return _unary(mgr, X, "tanh")
 def gelu(mgr, X):     return _unary(mgr, X, "gelu")
 
 def add(mgr, A, B): return _binary(mgr, A, B, "add")
 def sub(mgr, A, B): return _binary(mgr, A, B, "sub")
 def mul(mgr, A, B): return _binary(mgr, A, B, "mul")
 def div(mgr, A, B): return _binary(mgr, A, B, "div")
+
+
+# GPU-resident wrappers (no CPU transfer)
+
+def unary_gpu(mgr, t_x, t_y, n: int, op: str) -> None:
+    spirv = compile_shader("unary").read_bytes()
+    wg_x = math.ceil(n / 256)
+    algo = mgr.algorithm(
+        [t_x, t_y], spirv, (wg_x, 1, 1), [],
+        [float(n), float(_UNARY_OPS[op])]
+    )
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()
+
+
+def binary_gpu(mgr, t_a, t_b, t_c, n: int, op: str) -> None:
+    spirv = compile_shader("binary").read_bytes()
+    wg_x = math.ceil(n / 256)
+    algo = mgr.algorithm(
+        [t_a, t_b, t_c], spirv, (wg_x, 1, 1), [],
+        [float(n), float(_BINARY_OPS[op]), float(0)]
+    )
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()
+
+
+def accumulate_gpu(mgr, t_dst, t_src, n: int, sign: float = 1.0) -> None:
+    spirv = compile_shader("accumulate").read_bytes()
+    wg_x = math.ceil(n / 256)
+    algo = mgr.algorithm(
+        [t_dst, t_src], spirv, (wg_x, 1, 1), [],
+        [float(n), float(sign)]
+    )
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()
+
+
+def unary_backward_gpu(mgr, t_go, t_x, t_gi, n: int, op: str) -> None:
+    spirv = compile_shader("unary_backward").read_bytes()
+    wg_x = math.ceil(n / 256)
+    algo = mgr.algorithm(
+        [t_go, t_x, t_gi], spirv, (wg_x, 1, 1), [],
+        [float(n), float(_UNARY_OPS[op])]
+    )
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()

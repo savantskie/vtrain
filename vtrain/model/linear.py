@@ -1,6 +1,8 @@
 import numpy as np
+import kp
 from vtrain.tensor import Tensor
 import vtrain.functional as F
+from vtrain.gpu_pool import get_pool
 
 
 class Linear:
@@ -33,11 +35,23 @@ class Linear:
             b_ref        = self.b
 
             def _backward():
+                pool = get_pool()
+                n_out   = int(np.prod(out.shape))
+                n_bias  = int(np.prod(b_ref.shape))
                 if out.requires_grad:
-                    out.grad += result.grad
+                    out._ensure_grad_on_gpu(mgr)
+                    from vtrain.ops.elementwise import accumulate_gpu
+                    accumulate_gpu(mgr, out._grad_kp, result._grad_kp, n_out, 1.0)
                 if b_ref.requires_grad:
-                    # Bias gradient is sum over batch dimension
-                    b_ref.grad += result.grad.sum(axis=0)
+                    b_ref._ensure_grad_on_gpu(mgr)
+                    sq = mgr.sequence()
+                    sq.record(kp.OpSyncLocal([result._grad_kp]))
+                    sq.eval()
+                    b_cpu = result._grad_kp.data().reshape(batch, b_ref.shape[0]).sum(axis=0)
+                    b_ref._grad_kp.data()[:] += b_cpu.astype(np.float32)
+                    sq2 = mgr.sequence()
+                    sq2.record(kp.OpSyncDevice([b_ref._grad_kp]))
+                    sq2.eval()
 
             result._backward = _backward
             return result

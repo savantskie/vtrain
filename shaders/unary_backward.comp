@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer GradOut { float go[]; };
+layout(set = 0, binding = 1) buffer Input   { float x[]; };
+layout(set = 0, binding = 2) buffer GradIn  { float gi[]; };
+layout(push_constant) uniform Push { float n_elements; float op; } pc;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint n = uint(pc.n_elements), op = uint(pc.op);
+    if (idx >= n) return;
+    float val = x[idx], d;
+    if (op == 0u) { d = val > 0.0 ? 1.0 : 0.0; }
+    else if (op == 1u) { float s = 1.0/(1.0+exp(-val)); d = s*(1.0-s); }
+    else if (op == 2u) { float t = tanh(val); d = 1.0-t*t; }
+    else { float c=0.7978845608, inner=c*(val+0.044715*val*val*val), t=tanh(inner);
+           d = 0.5*(1.0+t) + 0.5*val*(1.0-t*t)*c*(1.0+3.0*0.044715*val*val); }
+    gi[idx] += go[idx] * d;
+}

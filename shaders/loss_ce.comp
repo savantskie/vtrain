@@ -1,0 +1,23 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer Pred   { float p[]; };
+layout(set = 0, binding = 1) buffer Target { float t[]; };
+layout(set = 0, binding = 2) buffer Grad   { float g[]; };
+layout(set = 0, binding = 3) buffer LossOut { float loss[]; };
+layout(push_constant) uniform Push { float n_elements; float n_classes; float eps; } pc;
+shared float sh[256];
+void main() {
+    uint batch = gl_WorkGroupID.x, col = gl_LocalInvocationID.x;
+    uint R = uint(pc.n_elements/pc.n_classes), C = uint(pc.n_classes);
+    if (batch >= R) return;
+    float l = 0.0;
+    for (uint i = col; i < C; i += 256u) {
+        uint idx = batch*C+i; float pp = max(p[idx], pc.eps);
+        if (t[idx] > 0.5) l -= log(pp);
+        g[idx] = -t[idx] / pp;
+    }
+    sh[col] = l; barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (col < stride) { sh[col] += sh[col+stride]; } barrier(); }
+    if (col == 0u) loss[batch] = sh[0];
+}

@@ -36,3 +36,27 @@ def softmax(mgr: kp.Manager, X: np.ndarray) -> np.ndarray:
     sq.eval()
 
     return t_y.data().reshape(rows, cols)
+
+
+# GPU-resident wrappers
+
+def softmax_gpu(mgr, t_x, t_y, rows: int, cols: int) -> None:
+    spirv = compile_shader("softmax").read_bytes()
+    algo = mgr.algorithm(
+        [t_x, t_y], spirv, (rows, 1, 1), [],
+        [float(rows), float(cols), float(0), float(0)]
+    )
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()
+
+
+def softmax_backward_gpu(mgr, t_dy, t_s, t_dx, rows: int, cols: int) -> None:
+    spirv = compile_shader("softmax_backward").read_bytes()
+    algo = mgr.algorithm(
+        [t_dy, t_s, t_dx], spirv, (rows, 1, 1), [],
+        [float(rows), float(cols)]
+    )
+    sq = mgr.sequence()
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()

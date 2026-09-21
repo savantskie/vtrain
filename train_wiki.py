@@ -6,15 +6,13 @@ resumable from last checkpoint.
 
 import sys
 import signal
-import gc
 import numpy as np
 import kp
-import ctypes
 from pathlib import Path
 from vtrain.data.dataset  import CharDataset
 from vtrain.model.lm      import SmallLM
 from vtrain.model.checkpoint import save, load, save_optimizer, load_optimizer, params_from_block
-from vtrain.loss          import cross_entropy_loss
+from vtrain.loss import cross_entropy_loss_gpu
 from vtrain.optim         import Adam
 from vtrain.tensor        import Tensor
 import vtrain.functional as F
@@ -147,6 +145,11 @@ def main():
     from vtrain.gpu_pool import GPUBufferPool, set_pool
     pool = GPUBufferPool(mgr)
     set_pool(pool)
+
+    for p in model.parameters():
+        p.ensure_on_gpu(mgr)
+        pool.register_persistent(p._kp_tensor)
+
     opt = Adam(model.parameters(), lr=CONFIG["lr"])
     opt_ref = opt
 
@@ -156,8 +159,9 @@ def main():
 
     step       = start_step
     step_ref[0] = step
-    t_start    = time.time()
-    losses     = []
+    t_start      = time.time()
+    last_log_time = t_start
+    losses       = []
 
     print(f"\n  Starting from step {step}, target {CONFIG['max_steps']}")
     print("─" * 55)
@@ -175,14 +179,11 @@ def main():
             requires_grad=False
         )
 
-        loss = cross_entropy_loss(probs, Y_oh)
+        loss = cross_entropy_loss_gpu(mgr, probs, Y_oh)
         loss.backward()
         from vtrain.tensor import flush_graph
         param_ids = {id(p) for p in model.parameters()}
         flush_graph(loss, param_ids, pool)
-        gc.collect()
-        if sys.platform == 'linux':
-            ctypes.CDLL('libc.so.6').malloc_trim(0)
         opt.step()
 
         loss_val    = float(loss.data)
@@ -191,9 +192,11 @@ def main():
         losses.append(loss_val)
 
         if step % CONFIG["log_every"] == 0:
+            now      = time.time()
             avg_loss = np.mean(losses[-CONFIG["log_every"]:])
-            elapsed  = time.time() - t_start
-            rate     = step / elapsed
+            elapsed  = now - t_start
+            rate     = CONFIG["log_every"] / (now - last_log_time)
+            last_log_time = now
             eta      = (CONFIG["max_steps"] - step) / rate / 3600
 
             print(f"  step {step:6d}  "

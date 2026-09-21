@@ -1,0 +1,11 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer Dst { float a[]; };
+layout(set = 0, binding = 1) buffer Src { float b[]; };
+layout(push_constant) uniform Push { float n_elements; float sign; } pc;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint n   = uint(pc.n_elements);
+    if (idx >= n) return;
+    a[idx] += pc.sign * b[idx];
+}

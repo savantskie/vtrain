@@ -1,0 +1,20 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer Param { float p[]; };
+layout(set = 0, binding = 1) buffer Grad  { float g[]; };
+layout(set = 0, binding = 2) buffer M     { float m[]; };
+layout(set = 0, binding = 3) buffer V     { float v[]; };
+layout(push_constant) uniform Push {
+    float n_elements; float lr; float beta1; float beta2;
+    float eps; float t; float b1_corr; float b2_corr;
+} pc;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint n   = uint(pc.n_elements);
+    if (idx >= n) return;
+    float gval = g[idx];
+    float mval = pc.beta1 * m[idx] + (1.0 - pc.beta1) * gval;
+    float vval = pc.beta2 * v[idx] + (1.0 - pc.beta2) * gval * gval;
+    m[idx] = mval; v[idx] = vval;
+    p[idx] -= pc.lr * (mval * pc.b1_corr) / (sqrt(vval * pc.b2_corr) + pc.eps);
+}

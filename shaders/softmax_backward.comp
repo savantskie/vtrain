@@ -1,0 +1,20 @@
+#version 450
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) buffer GradOut { float dy[]; };
+layout(set = 0, binding = 1) buffer Softmax { float s[]; };
+layout(set = 0, binding = 2) buffer GradIn  { float dx[]; };
+layout(push_constant) uniform Push { float rows; float cols; } pc;
+shared float sh[256];
+void main() {
+    uint col = gl_LocalInvocationID.x, row = gl_WorkGroupID.x;
+    uint R = uint(pc.rows), C = uint(pc.cols);
+    if (row >= R) return;
+    float dot = 0.0;
+    for (uint i = col; i < C; i += 256u) { dot += dy[row*C+i] * s[row*C+i]; }
+    sh[col] = dot; barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1) {
+        if (col < stride) { sh[col] += sh[col+stride]; } barrier(); }
+    float row_dot = sh[0];
+    for (uint i = col; i < C; i += 256u) {
+        uint idx = row*C+i; dx[idx] += s[idx] * (dy[idx] - row_dot); }
+}

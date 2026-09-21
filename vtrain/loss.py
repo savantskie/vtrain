@@ -1,15 +1,9 @@
 import numpy as np
+import kp
 from vtrain.tensor import Tensor
 
 
 def mse_loss(pred: Tensor, target: Tensor) -> Tensor:
-    """
-    Mean Squared Error — average of (pred - target)²
-    Standard loss for regression tasks.
-
-    pred/target shape: any, but must match.
-    Returns: scalar Tensor
-    """
     diff = pred.data - target.data
     loss = Tensor(np.array(np.mean(diff ** 2), dtype=np.float32),
                   requires_grad=True)
@@ -18,7 +12,6 @@ def mse_loss(pred: Tensor, target: Tensor) -> Tensor:
     def _backward():
         if pred.requires_grad:
             N = pred.data.size
-            # Gradient: 2*(pred - target)/N
             pred.grad += (2.0 * diff / N) * loss.grad
 
     loss._backward = _backward
@@ -26,20 +19,10 @@ def mse_loss(pred: Tensor, target: Tensor) -> Tensor:
 
 
 def cross_entropy_loss(pred: Tensor, target: Tensor) -> Tensor:
-    """
-    Cross-entropy loss — expects pred to already be softmax probabilities.
-
-    pred shape:   (batch, n_classes) — softmax output
-    target shape: (batch, n_classes) — one-hot encoded labels
-    Returns: scalar Tensor
-
-    Why one-hot: keeps it consistent with the rest of our Tensor pipeline.
-    A helper below converts integer class labels to one-hot if needed.
-    """
-    eps     = 1e-7   # prevents log(0) which is -inf
+    """CPU cross-entropy — kept for tests and CPU fallback."""
+    eps     = 1e-7
     p       = np.clip(pred.data, eps, 1.0)
     batch   = pred.data.shape[0]
-
     loss_val = -np.mean(np.sum(target.data * np.log(p), axis=-1))
     loss     = Tensor(np.array(loss_val, dtype=np.float32),
                       requires_grad=True)
@@ -47,19 +30,62 @@ def cross_entropy_loss(pred: Tensor, target: Tensor) -> Tensor:
 
     def _backward():
         if pred.requires_grad:
-            # Gradient: -(target / pred) / batch
             pred.grad += (-target.data / p / batch) * loss.grad
 
     loss._backward = _backward
     return loss
 
 
+def cross_entropy_loss_gpu(mgr: kp.Manager, pred: Tensor, target: Tensor) -> Tensor:
+    """GPU cross-entropy — uses loss_ce shader. Gradient stays on GPU."""
+    from vtrain.gpu_pool import get_pool
+    from vtrain.shader_utils import compile_shader
+    pool = get_pool()
+    batch, n_classes = pred.shape
+    n = batch * n_classes
+
+    t_grad = pool.acquire(n) if pool else mgr.tensor(np.zeros(n, dtype=np.float32))
+    if pool:
+        pool.register_persistent(t_grad)
+    t_loss_arr = mgr.tensor(np.zeros(batch, dtype=np.float32))
+
+    t_pred = pred.ensure_on_gpu(mgr)
+    t_target = target.ensure_on_gpu(mgr)
+
+    spirv = compile_shader("loss_ce").read_bytes()
+    algo = mgr.algorithm(
+        [t_pred, t_target, t_grad, t_loss_arr],
+        spirv, (batch, 1, 1), [],
+        [float(n), float(n_classes), float(1e-7)]
+    )
+    sq = mgr.sequence()
+    sq.record(kp.OpSyncDevice([t_loss_arr]))
+    sq.record(kp.OpAlgoDispatch(algo))
+    sq.eval()
+
+    sq2 = mgr.sequence()
+    sq2.record(kp.OpSyncLocal([t_loss_arr]))
+    sq2.eval()
+    loss_val = float(np.mean(t_loss_arr.data()[:batch]))
+
+    out = Tensor(np.array(loss_val, dtype=np.float32), requires_grad=True)
+    out._mgr = mgr
+    out._prev = {pred}
+
+    pred._grad_kp = t_grad
+    if pool:
+        pool.register_persistent(t_grad)
+    pred._grad_data = None
+    pred._mgr = mgr
+
+    def _backward():
+        pass
+
+    out._backward = _backward
+    return out
+
+
 def one_hot(labels: np.ndarray, n_classes: int) -> np.ndarray:
-    """
-    Convert integer class labels to one-hot encoding.
-    labels shape: (batch,) of integers in [0, n_classes)
-    Returns:      (batch, n_classes) float32
-    """
     out = np.zeros((len(labels), n_classes), dtype=np.float32)
     out[np.arange(len(labels)), labels] = 1.0
     return out

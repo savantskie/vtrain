@@ -4,18 +4,19 @@ import numpy as np
 class Tensor:
     """
     Wraps a numpy array with gradient tracking and autograd support.
-    Supports GPU-resident mode: data lives in a kp.Tensor GPU buffer
-    and is only synced to CPU when .data is actually accessed (lazy sync).
+    GPU-primary: data lives in a kp.Tensor GPU buffer and is only synced
+    to CPU when .data is accessed (lazy sync). Gradients are also GPU-resident.
     """
 
     def __init__(self, data, requires_grad=True, name=""):
         self._data        = np.array(data, dtype=np.float32)
-        self._kp_tensor   = None               # GPU buffer (kp.Tensor), if resident
-        self._gpu_fresh   = False              # True = GPU buffer has latest values
-        self._mgr         = None               # kp.Manager, set by GPU ops
-        self._shape_cache = self._data.shape   # cached — shape never triggers GPU sync
+        self._kp_tensor   = None
+        self._gpu_fresh   = False
+        self._mgr         = None
+        self._shape_cache = self._data.shape
         self.requires_grad = requires_grad
-        self.grad          = np.zeros_like(self._data) if requires_grad else None
+        self._grad_kp     = None    # GPU-resident gradient buffer
+        self._grad_data   = None    # CPU copy, lazily synced
         self._backward     = lambda: None
         self._prev         = set()
         self.name          = name
@@ -43,6 +44,30 @@ class Tensor:
         self._data        = np.array(value, dtype=np.float32)
         self._shape_cache = self._data.shape
         self._gpu_fresh   = False
+
+    # ── Gradient property — GPU-resident ─────────────────────────────────────
+
+    @property
+    def grad(self) -> np.ndarray:
+        """Return CPU numpy gradient, syncing from GPU if needed."""
+        if self._grad_kp is not None and self._mgr is not None:
+            if self._grad_data is None:
+                import kp
+                sq = self._mgr.sequence()
+                sq.record(kp.OpSyncLocal([self._grad_kp]))
+                sq.eval()
+                self._grad_data = (self._grad_kp.data()
+                                   .reshape(self._shape_cache)
+                                   .copy()
+                                   .astype(np.float32))
+            return self._grad_data
+        return None
+
+    @grad.setter
+    def grad(self, value):
+        """Set gradient from numpy (for compatibility). Marks GPU stale."""
+        self._grad_data = np.array(value, dtype=np.float32)
+        self._grad_kp = None
 
     # ── GPU residency helpers ─────────────────────────────────────────────────
 
@@ -88,6 +113,37 @@ class Tensor:
         self._mgr         = mgr
         return self._kp_tensor
 
+    def _ensure_grad_on_gpu(self, mgr):
+        """Return kp.Tensor for gradient, uploading from CPU copy if needed."""
+        from vtrain.gpu_pool import get_pool
+        pool = get_pool()
+        flat_size = int(np.prod(self._shape_cache))
+
+        if self._grad_kp is not None and self._mgr is mgr:
+            return self._grad_kp
+
+        if self._grad_kp is None:
+            self._grad_kp = (pool.acquire(flat_size) if pool is not None
+                             else mgr.tensor(np.zeros(flat_size, dtype=np.float32)))
+            if pool is not None:
+                pool.register_persistent(self._grad_kp)
+
+        if self._grad_data is not None:
+            self._grad_kp.data()[:] = self._grad_data.flatten()
+            import kp
+            sq = mgr.sequence()
+            sq.record(kp.OpSyncDevice([self._grad_kp]))
+            sq.eval()
+        else:
+            self._grad_kp.data()[:] = 0.0
+            import kp
+            sq = mgr.sequence()
+            sq.record(kp.OpSyncDevice([self._grad_kp]))
+            sq.eval()
+
+        self._mgr = mgr
+        return self._grad_kp
+
     # ── Autograd ──────────────────────────────────────────────────────────────
 
     def backward(self):
@@ -103,15 +159,49 @@ class Tensor:
 
         build_topo(self)
 
-        # Loss is always on CPU — use _data directly, no sync needed
-        self.grad = np.ones_like(self._data)
+        from vtrain.gpu_pool import get_pool
+        pool = get_pool()
+        import kp
+
+        # Initialize loss gradient
+        flat_size = int(np.prod(self._shape_cache))
+        self._grad_kp = (pool.acquire(flat_size) if pool is not None
+                         else self._mgr.tensor(np.ones(flat_size, dtype=np.float32)))
+        if pool is not None:
+            pool.register_persistent(self._grad_kp)
+        self._grad_kp.data()[:] = np.ones(flat_size, dtype=np.float32)
+        sq = self._mgr.sequence()
+        sq.record(kp.OpSyncDevice([self._grad_kp]))
+        sq.eval()
+        self._grad_data = None
+
+        # Pre-initialize grad_kp for every node so closures accumulate safely
+        for t in topo:
+            if t is not self and t._grad_kp is None:
+                fs = int(np.prod(t._shape_cache))
+                t._grad_kp = (pool.acquire(fs) if pool is not None
+                              else self._mgr.tensor(np.zeros(fs, dtype=np.float32)))
+                if pool is not None:
+                    pool.register_persistent(t._grad_kp)
+                t._grad_kp.data()[:] = 0.0
+                sq2 = self._mgr.sequence()
+                sq2.record(kp.OpSyncDevice([t._grad_kp]))
+                sq2.eval()
+                t._grad_data = None
+                if t._mgr is None:
+                    t._mgr = self._mgr
 
         for t in reversed(topo):
             t._backward()
 
     def zero_grad(self):
-        if self.grad is not None:
-            self.grad[:] = 0.0
+        if self._grad_kp is not None and self._mgr is not None:
+            import kp
+            self._grad_kp.data()[:] = 0.0
+            sq = self._mgr.sequence()
+            sq.record(kp.OpSyncDevice([self._grad_kp]))
+            sq.eval()
+        self._grad_data = None
 
     def zero_grad_all(self):
         visited = set()
@@ -165,10 +255,13 @@ def flush_graph(root: 'Tensor', keep: set, pool) -> None:
                 pool.release(t._kp_tensor)
                 t._kp_tensor = None
                 t._gpu_fresh = False
-            t.grad  = None
+            if t._grad_kp is not None and pool is not None:
+                pool.release(t._grad_kp)
+                t._grad_kp = None
+            t._grad_data = None
             if t is not root:
                 t._data = None
-            t._prev = set()       # break reference cycles
-            t._backward = None    # release closure-captured numpy arrays
+            t._prev = set()
+            t._backward = None
 
     _walk(root)
