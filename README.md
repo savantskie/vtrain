@@ -26,26 +26,26 @@ A complete training framework built from the ground up:
 - GLSL compute shaders for every operation, compiled to SPIR-V via glslc
 - Full forward pass: matmul, elementwise ops (ReLU, GELU, sigmoid, tanh, add, sub,
   mul, div), layer normalization, softmax, transpose, attention
-- Full backward pass with GPU shaders for every op - no CPU fallback
-- GPU-resident backward: matmul gradients computed entirely on GPU
-  via buffer pool, avoiding CPU round-trips
-- Lazy GPU sync: Tensor data stays on GPU across chained operations
-  and syncs to CPU only when accessed
+- Full backward pass with GPU shaders for every op — no CPU fallback
+- GPU-resident gradients: every backward closure dispatches GPU shaders
+  (matmul, unary_backward, softmax_backward, accumulate, etc.)
+- GPU-resident optimizer: Adam/SGD step dispatched as GPU shader per parameter,
+  momentum buffers stored as GPU kp.Tensor
+- GPU-resident loss: cross-entropy computed entirely on GPU
+- GPU-primary tensors: data and gradients live in kp.Tensor buffers on GPU.
+  CPU sync only happens for loss scalar reads, checkpoint saves, and logging.
 - GPU buffer reuse pool to avoid allocating GPU memory every dispatch
-- Memory leak prevention: in-place gradient zeroing, computation graph flushing,
-  and periodic glibc arena trimming keep system RAM stable over long training runs
 - Autograd system with topological sort and numerical gradient verification
-- Loss functions: MSE and cross-entropy
-- Optimizers: SGD and Adam
+- Adam optimizer with GPU-resident momentum/velocity buffers
 - Transformer architecture: embeddings, multi-head attention, feed-forward layers,
   residual connections
 - Character-level language model (SmallLM) ready to train on any text corpus
 - Wikipedia data pipeline: download, extract, clean, and train
 - Training loop with checkpointing, crash recovery, and resume support
-  — optimizer state (Adam momentum/velocity buffers, step counter,
-  hyperparameters) is saved alongside weights, so resumed training
-  continues with full optimizer state intact
+  — optimizer state saved alongside weights, resumed training continues
+  with full momentum/velocity intact
 - Text generation from trained checkpoints
+- GPU device detection utility (vtrain/gpu_detect.py)
 
 ## Hardware requirements
 
@@ -167,8 +167,9 @@ vtrain/
   functional.py - Differentiable GPU op wrappers
   gpu_pool.py   - GPU buffer reuse pool
   grad_check.py - Numerical gradient verification
-  loss.py       - Loss functions
-  optim.py      - SGD and Adam optimizers
+  loss.py       - Loss functions (CPU and GPU)
+  optim.py      - SGD and Adam optimizers (GPU shader dispatch)
+  gpu_detect.py - Vulkan device enumeration
   train.py      - Reusable training loop
 shaders/        - GLSL compute shader source
 compiled/       - SPIR-V compiled shaders (generated at runtime)
@@ -195,14 +196,17 @@ obvious from the Kompute documentation:
    kp.OpSyncLocal. The PyPI package docs reference kp.OpTensorSyncDevice which
    does not exist in the actual build - and the PyPI package itself is broken on
    CMake 4.x anyway, which is why this repo builds Kompute from source.
-4. System RAM growth over long training runs is prevented by in-place gradient
-   zeroing (allocating new arrays every step slowly fragments glibc's malloc
-   arena), computation graph flushing after every backward pass, and periodic
-   gc.collect() + malloc_trim() calls. If you see RAM growing unboundedly,
-   check that your training loop includes all three.
-5. Optimizer state (Adam momentum/velocity) is now checkpointed alongside
+4. GPU-resident gradients: gradients are stored as GPU kp.Tensor buffers,
+   not numpy arrays. Accessing tensor.grad triggers a GPU→CPU sync.
+   backward() pre-initializes gradient buffers for every node in the
+   autograd graph before running closures, preventing null-pointer crashes.
+   Buffers are freed by flush_graph() after the optimizer step.
+5. Optimizer state (Adam momentum/velocity) is checkpointed alongside
    weights. Resume preserves the optimizer's step counter and velocity
    estimates, so loss converges as if training was never interrupted.
+6. Cross-entropy loss now requires a kp.Manager argument for GPU dispatch.
+   The old CPU-only signature cross_entropy_loss(pred, target) is kept
+   for tests. Use cross_entropy_loss_gpu(mgr, pred, target) for training.
 
 ## License
 
