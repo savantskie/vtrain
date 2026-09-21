@@ -21,6 +21,14 @@ class SGD:
         self.params = params
         self.lr     = lr
 
+    def state_dict(self) -> dict:
+        """Return optimizer state for checkpointing."""
+        return {"lr": self.lr}
+
+    def load_state_dict(self, state: dict):
+        """Restore optimizer state from checkpoint."""
+        self.lr = state["lr"]
+
     def step(self):
         """Apply one gradient update to all parameters."""
         for p in self.params:
@@ -62,6 +70,29 @@ class Adam:
         # One momentum buffer per parameter, initialized to zero
         self.m = [np.zeros_like(p.data) for p in params]
         self.v = [np.zeros_like(p.data) for p in params]
+
+    def state_dict(self) -> dict:
+        """Return optimizer state for checkpointing."""
+        return {
+            "m":     [arr.copy() for arr in self.m],
+            "v":     [arr.copy() for arr in self.v],
+            "t":     self.t,
+            "lr":    self.lr,
+            "beta1": self.beta1,
+            "beta2": self.beta2,
+            "eps":   self.eps,
+        }
+
+    def load_state_dict(self, state: dict):
+        """Restore optimizer state from checkpoint."""
+        for i in range(len(self.m)):
+            self.m[i][:] = state["m"][i]
+            self.v[i][:] = state["v"][i]
+        self.t     = state["t"]
+        self.lr    = state["lr"]
+        self.beta1 = state["beta1"]
+        self.beta2 = state["beta2"]
+        self.eps   = state["eps"]
 
     def step(self):
         self.t += 1

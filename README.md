@@ -42,6 +42,9 @@ A complete training framework built from the ground up:
 - Character-level language model (SmallLM) ready to train on any text corpus
 - Wikipedia data pipeline: download, extract, clean, and train
 - Training loop with checkpointing, crash recovery, and resume support
+  — optimizer state (Adam momentum/velocity buffers, step counter,
+  hyperparameters) is saved alongside weights, so resumed training
+  continues with full optimizer state intact
 - Text generation from trained checkpoints
 
 ## Hardware requirements
@@ -197,6 +200,9 @@ obvious from the Kompute documentation:
    arena), computation graph flushing after every backward pass, and periodic
    gc.collect() + malloc_trim() calls. If you see RAM growing unboundedly,
    check that your training loop includes all three.
+5. Optimizer state (Adam momentum/velocity) is now checkpointed alongside
+   weights. Resume preserves the optimizer's step counter and velocity
+   estimates, so loss converges as if training was never interrupted.
 
 ## License
 

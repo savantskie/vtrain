@@ -13,7 +13,7 @@ import ctypes
 from pathlib import Path
 from vtrain.data.dataset  import CharDataset
 from vtrain.model.lm      import SmallLM
-from vtrain.model.checkpoint import save, params_from_block
+from vtrain.model.checkpoint import save, load, save_optimizer, load_optimizer, params_from_block
 from vtrain.loss          import cross_entropy_loss
 from vtrain.optim         import Adam
 from vtrain.tensor        import Tensor
@@ -59,6 +59,7 @@ CONFIG = {
 
 model_ref  = None
 params_ref = None
+opt_ref    = None
 step_ref   = [0]
 
 def emergency_save(sig, frame):
@@ -66,6 +67,7 @@ def emergency_save(sig, frame):
         path = f"{CONFIG['run_dir']}/checkpoints/emergency_step_{step_ref[0]:06d}"
         print(f"\nSignal received — emergency save to {path}")
         save(params_ref, path)
+        save_optimizer(opt_ref, path)
     sys.exit(0)
 
 signal.signal(signal.SIGINT,  emergency_save)
@@ -97,7 +99,7 @@ def find_latest_checkpoint(run_dir: str):
 
 
 def main():
-    global model_ref, params_ref
+    global model_ref, params_ref, opt_ref
 
     run_dir  = Path(CONFIG["run_dir"])
     ckpt_dir = run_dir / "checkpoints"
@@ -137,7 +139,6 @@ def main():
     latest_ckpt, start_step = find_latest_checkpoint(CONFIG["run_dir"])
     if latest_ckpt:
         print(f"  Resuming from step {start_step}: {latest_ckpt}")
-        from vtrain.model.checkpoint import load
         load(params, latest_ckpt)
     else:
         print("  Starting fresh")
@@ -147,6 +148,11 @@ def main():
     pool = GPUBufferPool(mgr)
     set_pool(pool)
     opt = Adam(model.parameters(), lr=CONFIG["lr"])
+    opt_ref = opt
+
+    # Load optimizer state if resuming
+    if latest_ckpt:
+        load_optimizer(opt, latest_ckpt)
 
     step       = start_step
     step_ref[0] = step
@@ -206,10 +212,12 @@ def main():
         if step % CONFIG["checkpoint_every"] == 0:
             ckpt_path = str(ckpt_dir / f"step_{step:06d}")
             save(params, ckpt_path)
+            save_optimizer(opt, ckpt_path)
 
     # Final save
     final_path = str(ckpt_dir / f"step_{step:06d}_final")
     save(params, final_path)
+    save_optimizer(opt, final_path)
     print(f"\nDone. Final checkpoint at {final_path}")
 
 

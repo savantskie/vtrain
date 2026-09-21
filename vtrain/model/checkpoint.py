@@ -58,6 +58,75 @@ def load(params: dict, path: str):
     print(f"Loaded {len(params)} tensors from {save_dir}")
 
 
+def save_optimizer(optimizer, path: str):
+    """
+    Save optimizer state (momentum buffers, step counter, hyperparameters).
+
+    optimizer: an Adam or SGD optimizer instance.
+    path:      directory previously saved with save() / save_optimizer().
+
+    Saves buffers as .npy files, writes optimizer_manifest.json.
+    """
+    save_dir = Path(path)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    state = optimizer.state_dict()
+    manifest = {}
+
+    for key in ("m", "v"):
+        if key not in state:
+            continue
+        for i, arr in enumerate(state[key]):
+            filename = f"optim_{key}_{i:03d}.npy"
+            np.save(save_dir / filename, arr)
+            if key not in manifest:
+                manifest[key] = []
+            manifest[key].append({"file": filename, "shape": list(arr.shape)})
+
+    # Scalar values (t, lr, beta1, beta2, eps)
+    scalars = {k: v for k, v in state.items() if k not in ("m", "v")}
+    manifest["scalars"] = scalars
+
+    with open(save_dir / "optimizer_manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    print(f"  Saved optimizer state to {save_dir}")
+
+
+def load_optimizer(optimizer, path: str):
+    """
+    Restore optimizer state from disk.
+
+    optimizer: an Adam or SGD optimizer instance.
+    path:      directory previously saved with save_optimizer().
+    """
+    save_dir = Path(path)
+    manifest_path = save_dir / "optimizer_manifest.json"
+
+    if not manifest_path.exists():
+        print(f"  No optimizer state found at {save_dir} — starting fresh")
+        return
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    # Restore scalar hyperparameters first
+    state = manifest.get("scalars", {})
+    state["m"] = []
+    state["v"] = []
+
+    for key in ("m", "v"):
+        entries = manifest.get(key, [])
+        for entry in entries:
+            arr = np.load(save_dir / entry["file"])
+            assert list(arr.shape) == entry["shape"], \
+                f"Shape mismatch for optim_{key}: got {arr.shape}, expected {entry['shape']}"
+            state[key].append(arr)
+
+    optimizer.load_state_dict(state)
+    print(f"  Loaded optimizer state from {save_dir}")
+
+
 def params_from_block(block, prefix="") -> dict:
     """
     Helper: flatten a TransformerBlock or Linear's parameters into
