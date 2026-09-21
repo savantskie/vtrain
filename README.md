@@ -1,12 +1,21 @@
-# VTrain - Vulkan ML Training Framework
+# VTrain v2.5 — Vulkan ML Training Framework
 
-A from-scratch machine learning training framework built on Vulkan compute shaders.
-No CUDA. No ROCm. No vendor lock-in. If your GPU speaks Vulkan, it can train.
+## Every operation runs on GPU. Zero CPU round-trips during training.
+
+VTrain is a from-scratch machine learning training framework built entirely on
+Vulkan compute shaders. No CUDA. No ROCm. No vendor lock-in. Every forward pass,
+backward pass, autograd gradient accumulation, optimizer step, and loss
+computation runs through GLSL compute shaders dispatched via Vulkan. The CPU is
+only touched for logging, checkpoint saves, and data loading.
+
+**v2.5 is the GPU-resident rewrite.** Training produces zero CPU utilization
+beyond what the OS uses for idle processes. System RAM stays flat. No more
+numpy round-trips between steps. No more memory leaks from gradient arrays
+accumulating on the CPU side. Every gradient buffer lives and dies on the GPU.
 
 Built and tested on dual AMD MI50 32GB cards running Ubuntu 22.04 with Vulkan 1.4.x.
 Intended for anyone with Vulkan-capable hardware that the major training frameworks
-have left behind - older AMD cards, workstation GPUs, anything that falls outside
-the official ROCm or CUDA support matrix but still has real compute capability.
+have left behind.
 
 ## Why this exists
 
