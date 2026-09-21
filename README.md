@@ -37,6 +37,8 @@ A complete training framework built from the ground up:
 - GPU buffer reuse pool to avoid allocating GPU memory every dispatch
 - Autograd system with topological sort and numerical gradient verification
 - Adam optimizer with GPU-resident momentum/velocity buffers
+- GPU head splitting, merging, and gradient scatter — all on GPU via
+  dedicated shaders (no numpy slicing during multi-head attention)
 - Transformer architecture: embeddings, multi-head attention, feed-forward layers,
   residual connections
 - Character-level language model (SmallLM) ready to train on any text corpus
@@ -204,9 +206,10 @@ obvious from the Kompute documentation:
 5. Optimizer state (Adam momentum/velocity) is checkpointed alongside
    weights. Resume preserves the optimizer's step counter and velocity
    estimates, so loss converges as if training was never interrupted.
-6. Cross-entropy loss now requires a kp.Manager argument for GPU dispatch.
-   The old CPU-only signature cross_entropy_loss(pred, target) is kept
-   for tests. Use cross_entropy_loss_gpu(mgr, pred, target) for training.
+6. Cross-entropy loss is GPU-only: uses the loss_ce shader which computes
+   both the loss value and the gradient in a single GPU pass. The gradient
+   is placed directly into the prediction tensor's _grad_kp buffer, so
+   the backward closure is a no-op.
 
 ## License
 

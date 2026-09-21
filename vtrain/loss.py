@@ -1,5 +1,6 @@
 import numpy as np
 import kp
+import math
 from vtrain.tensor import Tensor
 
 
@@ -18,7 +19,7 @@ def mse_loss(pred: Tensor, target: Tensor) -> Tensor:
     return loss
 
 
-def cross_entropy_loss(pred: Tensor, target: Tensor) -> Tensor:
+def cross_entropy_loss_cpu(pred: Tensor, target: Tensor) -> Tensor:
     """CPU cross-entropy — kept for tests and CPU fallback."""
     eps     = 1e-7
     p       = np.clip(pred.data, eps, 1.0)
@@ -83,6 +84,9 @@ def cross_entropy_loss_gpu(mgr: kp.Manager, pred: Tensor, target: Tensor) -> Ten
 
     out._backward = _backward
     return out
+
+
+cross_entropy_loss = cross_entropy_loss_gpu
 
 
 def one_hot(labels: np.ndarray, n_classes: int) -> np.ndarray:

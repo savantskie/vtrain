@@ -1,12 +1,18 @@
 # VTrain System Map
 
+**Date:** 2026-09-21  
+**Purpose:** Complete architecture reference for the VTrain Vulkan ML training system.
+
+---
+
 ## Overview
 
 VTrain is a from-scratch, Vulkan-accelerated transformer language model training
 framework built entirely in Python with GLSL compute shaders. Zero dependency on
 PyTorch, JAX, TensorFlow, or CUDA. Every GPU operation — matmul, softmax, layer
-norm, activation functions — runs through Vulkan compute shaders compiled from
-GLSL to SPIR-V, dispatched via the Kompute library.
+norm, activation functions, optimizer steps, loss computation — runs through
+Vulkan compute shaders compiled from GLSL to SPIR-V, dispatched via the Kompute
+library (`kp`).
 
 ## Architecture
 
@@ -18,21 +24,21 @@ generate.py    ───┤
             │  tensor.py      (autograd)     │
             │  functional.py  (diff ops)     │
             │  optim.py       (SGD, Adam)    │
-            │  loss.py        (MSE, CE)      │
+            │  loss.py        (CE loss)      │
             │  train.py       (Trainer)      │
             │  grad_check.py  (verify grads) │
             │  shader_utils.py(compile .comp)│
             │  gpu_pool.py    (buffer reuse) │
-             │  gpu_detect.py  (device info)  │
+            │  gpu_detect.py  (device info)  │
             │                                 │
             │  ops/ ──────────────────────┐  │
             │  │  matmul.py   (GPU matmul)│  │
             │  │  elementwise.py(unary/   │  │
             │  │    binary ops)          │  │
-            │  │  softmax.py              │  │
-            │  │  layernorm.py            │  │
-            │  │  transpose.py            │  │
-            │  │  attention.py (composed) │  │
+            │  │  softmax.py   (GPU)     │  │
+            │  │  layernorm.py (GPU)     │  │
+            │  │  transpose.py (GPU)     │  │
+            │  │  attention.py (composed)│  │
             │  └──────────────────────────┘  │
             │                                 │
             │  model/ ───────────────────┐   │
@@ -84,6 +90,7 @@ Wraps numpy arrays with autograd support. Key design:
 - **Autograd**: topological sort + backward closures in reverse order
 - **flush_graph()**: After backward, releases GPU buffers (`_kp_tensor` and
   `_grad_kp`) for non-parameter tensors and breaks reference cycles
+- **zero_grad()**: Zeros `_grad_kp` in-place on GPU — no reallocation
 
 ### GPU Operations (`vtrain/ops/`)
 
@@ -100,26 +107,31 @@ Every op follows the same dual pattern:
 **GPU-resident form** (e.g., `matmul_gpu(mgr, t_a, t_b, t_c, M, K, N)`):
 - Operates on pre-uploaded kp.Tensors
 - No sync operations — result stays on GPU
-- Used by functional.py's backward passes via buffer pool
+- Used by functional.py for ALL backward passes via buffer pool
 
 ### Shader Details
 
 | Shader | Workgroup | Buffers | Operation |
-|--------|-----------|---------|-----------|
-| matmul.comp | 16×16 | A, B, C | C[i][j] = sum_k A[i][k] * B[k][j] |
-| unary.comp | 256×1 | X, Y | Switch: 0=ReLU, 1=sigmoid, 2=tanh, 3=GELU |
-| binary.comp | 256×1 | A, B, C | Switch: 0=add, 1=sub, 2=mul, 3=div |
-| softmax.comp | 256×1 | X, Y | 3-pass: max, exp+sum, normalize |
-| layernorm.comp | 256×1 | X, Y, γ, β | 2-pass: mean/var, normalize+scale |
-| transpose.comp | 16×16 | X, Y | Tiled with bank-conflict avoidance |
-| adam_step.comp | 256×1 | p, g, m, v | Per-element Adam update, 8 push constants |
-| sgd_step.comp | 256×1 | p, g | Per-element SGD update |
-| accumulate.comp | 256×1 | dst, src | dst += sign * src (sign push constant) |
-| unary_backward.comp | 256×1 | go, x, gi | gi += go * derivative(x) for relu/sigmoid/tanh/gelu |
-| softmax_backward.comp | 256×1 | dy, s, dx | dx += s * (dy - sum(dy*s)), shared-memory reduction |
-| loss_ce.comp | 256×1 | p, t, g, loss | Cross-entropy loss + gradient, 1 workgroup/batch element |
-| split_heads.comp | 256×1 | src, dst | Q(B, d_model) → Q_heads(n_heads, B, d_k) |
-| merge_heads.comp | 256×1 | src, dst | Inverse of split_heads |
+|---|---|---|---|
+| matmul.comp | 16x16 | A, B, C | C[i][j] = sum_k A[i][k] * B[k][j] |
+| unary.comp | 256 | X, Y | Switch: 0=ReLU, 1=sigmoid, 2=tanh, 3=GELU |
+| unary_backward.comp | 256 | go, x, gi | gi += go * derivative(x) for all 4 |
+| binary.comp | 256 | A, B, C | Switch: 0=add, 1=sub, 2=mul, 3=div |
+| accumulate.comp | 256 | dst, src | dst += sign * src |
+| softmax.comp | 256 | X, Y | 3-pass: max, exp+sum, normalize |
+| softmax_backward.comp | 256 | dy, s, dx | dx += s * (dy - sum(dy*s)), shared reduction |
+| layernorm.comp | 256 | X, Y, gamma, beta | 2-pass: mean/var, normalize+scale |
+| transpose.comp | 16x16 | X, Y | Tiled with bank-conflict avoidance |
+| loss_ce.comp | 256 | p, t, g, loss | CE loss + gradient, 1 wg per batch element |
+| adam_step.comp | 256 | p, g, m, v | Adam: m/v update + bias correction + param -= lr*step |
+| sgd_step.comp | 256 | p, g | param -= lr * grad |
+| split_heads.comp | 256 | src, dst | (B, d_model) -> (n_heads, B, d_k) flat |
+| merge_heads.comp | 256 | src, dst | Inverse of split_heads |
+| copy_block.comp | 256 | src, dst | Copy/accumulate block with offsets |
+| scatter_head.comp | 256 | src, dst | Scatter head gradient into full buffer |
+| fused_attention.comp | 32 | Q, K, V, O | Fused MHA (experimental) |
+| binary_debug.comp | 1 | A, B, C | Debug: 4 fixed elements |
+| relu.comp | 256 | X, Y | Standalone ReLU (legacy) |
 
 ### Autograd (`vtrain/functional.py`)
 
@@ -130,23 +142,31 @@ Every op function takes `kp.Manager` + Tensor inputs and:
 4. Wraps result in Tensor with `_prev` set to inputs and `mark_gpu_fresh()`
 5. Defines `_backward` closure that accumulates gradients via GPU ops
 
-**All backward closures use GPU ops.** No numpy math in any backward path:
-- matmul: GPU-resident matmul + transpose
-- unary ops (relu, sigmoid, tanh, gelu): `unary_backward_gpu` shader
-- binary ops (add, sub, mul, div): `accumulate_gpu` + `binary_gpu`
-- softmax: `softmax_backward_gpu` shader (shared-memory reduction)
-- layer norm: CPU math but gradients synced to GPU via `_ensure_grad_on_gpu()`
+**All backward closures use GPU ops** with one exception (layernorm backward):
+- matmul: GPU-resident matmul + transpose + accumulate
+- unary ops (relu, sigmoid, tanh, gelu): unary_backward_gpu shader
+- binary ops (add, sub, mul, div): accumulate_gpu + binary_gpu
+- softmax: softmax_backward_gpu shader (shared-memory reduction)
+- layer norm: CPU numpy, synced to GPU after
+
+### Multi-Head Attention — GPU-Resident
+
+TransformerBlock uses GPU shaders for head operations:
+1. **split_heads_gpu**: (B, d_model) → (n_heads, B, d_k) flat
+2. **copy_block_gpu**: Copy per-head slices to separate buffers
+3. Per-head attention via F.attention() — composed GPU ops
+4. **merge_heads_gpu**: Concatenate head outputs to (B, d_model)
+5. **scatter_head_gpu**: Scatter per-head gradients back to full gradient
+
+No numpy slicing. No CPU syncs. Every head operation is a GLSL shader dispatch.
 
 ### Model Architecture
 
 **SmallLM**: Embedding → N×TransformerBlock → Linear head → logits
 
 **TransformerBlock**: Pre-norm design:
-- LayerNorm → Multi-Head Attention → residual
+- LayerNorm → Multi-Head Attention (GPU split/merge/scatter) → residual
 - LayerNorm → FeedForward (Linear→GELU→Linear) → residual
-
-Head slicing is done on CPU via closure factories to avoid Python's
-loop-variable capture bug.
 
 ### Training Loop
 
@@ -155,14 +175,17 @@ Configurable via CLI args in `train_wiki.py`:
 - Model construction from config
 - Checkpoint resume from last saved step (weights + optimizer state)
 - Parameter upload to GPU and persistent registration in buffer pool
-- Per step: zero_grad (GPU) → get_batch → forward (GPU-resident) →
-  softmax → CE loss (GPU shader) → backward (GPU-resident) →
-  flush_graph → optimizer step (GPU shader, per-parameter dispatch)
+- Per step: zero_grad (GPU) → get_batch → forward (GPU-resident, all ops) →
+  softmax → CE loss (GPU shader, outputs loss + gradient in one pass) →
+  backward (GPU-resident, pre-initialized) → flush_graph →
+  optimizer step (GPU shader per parameter)
 
 No CPU round-trips during training. CPU only involved for:
 - Loss scalar read (one float per log interval)
 - Checkpoint save/load (one GPU→CPU sync per parameter)
-- Console logging
+- CharEmbedding lookup (numpy gather)
+- Linear bias addition (numpy tile)
+- Layernorm backward (CPU numpy math)
 
 ## Known Quirks
 

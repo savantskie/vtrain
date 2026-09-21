@@ -420,13 +420,13 @@ def transpose(mgr: kp.Manager, X: Tensor) -> Tensor:
 
 def attention(mgr: kp.Manager, Q: Tensor, K: Tensor, V: Tensor) -> Tensor:
     import math
-    d_k = Q.data.shape[-1]
+    d_k = Q.shape[-1]
 
     K_T    = transpose(mgr, K)
     scores = matmul(mgr, Q, K_T)
 
     scale  = Tensor(
-        np.full(scores.data.shape, 1.0 / math.sqrt(d_k), dtype=np.float32),
+        np.full(scores.shape, 1.0 / math.sqrt(d_k), dtype=np.float32),
         requires_grad=False
     )
     scores  = mul(mgr, scores, scale)

@@ -1,0 +1,27 @@
+#version 450
+
+// Scatter-accumulate one head's gradient (B*d_k) back into full gradient (B*d_model)
+// For each element (b, k): dst[b * d_model + h * dk + k] += src[b * dk + k]
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer SrcBuf { float src[]; };
+layout(set = 0, binding = 1) buffer DstBuf { float dst[]; };
+
+layout(push_constant) uniform Push {
+    float B;
+    float d_model;
+    float head;
+    float dk;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total = uint(pc.B) * uint(pc.dk);
+    if (idx >= total) return;
+
+    uint b = idx / uint(pc.dk);
+    uint k = idx % uint(pc.dk);
+    uint dst_idx = b * uint(pc.d_model) + uint(pc.head) * uint(pc.dk) + k;
+    dst[dst_idx] += src[idx];
+}

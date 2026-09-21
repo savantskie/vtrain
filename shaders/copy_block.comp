@@ -1,0 +1,28 @@
+#version 450
+
+// Copies or accumulates a contiguous block between GPU buffers:
+//   dst[dst_offset + i] = src[src_offset + i]   (accumulate == 0)
+//   dst[dst_offset + i] += src[src_offset + i]  (accumulate != 0)
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer SrcBuf { float src[]; };
+layout(set = 0, binding = 1) buffer DstBuf { float dst[]; };
+
+layout(push_constant) uniform Push {
+    float n;
+    float src_offset;
+    float dst_offset;
+    float accumulate;
+} pc;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= uint(pc.n)) return;
+    float val = src[uint(pc.src_offset) + idx];
+    if (pc.accumulate > 0.5) {
+        dst[uint(pc.dst_offset) + idx] += val;
+    } else {
+        dst[uint(pc.dst_offset) + idx] = val;
+    }
+}
